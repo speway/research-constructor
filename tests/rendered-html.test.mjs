@@ -45,7 +45,24 @@ test("serves the research workflow without a server error", async () => {
   }, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(response.status, 200);
   const html = await response.text();
-  for (const label of ["Логика исследования", "Выборка", "Методы", "План анализа", "Этика и данные"]) {
-    assert.match(html, new RegExp(label));
+  for (const label of [
+    "Логика исследования",
+    "Литература и пробел",
+    "Переменные и модель",
+    "Выборка",
+    "Методы",
+    "Протокол и процедура",
+    "План анализа",
+    "Этика и данные",
+    "Отчёт и защита",
+    "Аудит готовности",
+    "Справочник",
+    "психфак МГУ",
+    "кафедра психологии филиала МГУ в Ташкенте",
+    "протокола № 3 от 28.09.2023",
+  ]) {
+    assert.match(html, new RegExp(label, "i"));
   }
+  assert.doesNotMatch(html, /НИУ ВШЭ|hse\.ru/i);
+  assert.match(html, /Запрещено основывать работу/);
 });
