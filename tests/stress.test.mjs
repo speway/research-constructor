@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { performance } from "node:perf_hooks";
-import { analyzeTopic, findRestrictedDatasetPath } from "../app/research-logic.ts";
+import { analyzeTopic, findRepeatedIdentifierPath, findRestrictedDatasetPath } from "../app/research-logic.ts";
 
 test("анализ темы ограничивает сверхдлинный ввод и остаётся быстрым", () => {
   const huge = `влияние ${"связь регуляции эмоций со стрессом у студентов ".repeat(25_000)}`;
@@ -26,9 +26,15 @@ test("сканер импорта выдерживает циклы, глуби�
   assert.match(findRestrictedDatasetPath(wide) ?? "", /слишком сложная структура/);
 });
 
+test("сканер идентификаторов допускает служебный контакт, но блокирует список", () => {
+  assert.equal(findRepeatedIdentifierPath({ supervisor: "researcher@example.org", consent: "Вопросы: +998 90 123 45 67" }), null);
+  const path = findRepeatedIdentifierPath({ notes: "a@example.org, b@example.org, c@example.org" });
+  assert.match(path ?? "", /notes/);
+});
+
 test("fuzz-сканирование не пропускает запрещённые контейнеры и не падает", () => {
   const started = performance.now();
-  for (let index = 0; index < 2_000; index += 1) {
+  for (let index = 0; index < 10_000; index += 1) {
     const payload = {
       title: `Проект ${index}`,
       plan: [{ step: "question", value: index }, { step: "method", nested: { ok: true } }],

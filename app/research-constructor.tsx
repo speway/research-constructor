@@ -43,8 +43,9 @@ import {
 import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { analysisGuide, branchRequirements, dataSafetyLevels, experimentDesigns, experimentNorms, experimentThreats, glossary, methodBank, reportingStandards, researchPathways, statDecisionStages, theoryFrameworks } from "./research-data";
 import type { MethodInfo } from "./research-data";
-import { analyzeTopic, experimentReadiness, findRestrictedDatasetPath } from "./research-logic";
+import { analyzeTopic, experimentReadiness, findRepeatedIdentifierPath, findRestrictedDatasetPath } from "./research-logic";
 import type { TopicProfile } from "./research-logic";
+import { buildRecruitmentStressScenario, evidenceHealth } from "./research-metrics";
 import { clearProjectStorage, LEGACY_STORAGE_KEY, STORAGE_KEY } from "./storage";
 
 type StepId = "overview" | "logic" | "evidence" | "variables" | "design" | "sample" | "methods" | "protocol" | "analysis" | "ethics" | "report" | "audit";
@@ -52,6 +53,8 @@ type Hypothesis = { id: string; text: string; type: "directional" | "non-directi
 type MethodItem = MethodInfo;
 type KnowledgeTab = "terms" | "standards" | "methods" | "branch" | "experiment";
 type VariableItem = { id: string; name: string; role: "predictor" | "outcome" | "mediator" | "moderator" | "covariate"; definition: string; indicator: string; scale: "nominal" | "ordinal" | "quantitative"; instrument: string };
+type EvidenceItem = { id: string; citation: string; year: number; design: string; sample: string; finding: string; limitation: string; relevance: string; stance: "supports" | "mixed" | "contradicts" | "context" };
+type DecisionItem = { id: string; date: string; decision: string; rationale: string; timing: "before-data" | "after-data"; status: "planned" | "adopted" | "revised" };
 type Project = {
   title: string;
   level: string;
@@ -75,6 +78,7 @@ type Project = {
   searchQuery: string;
   literatureCriteria: string;
   evidenceGap: string;
+  evidenceItems: EvidenceItem[];
   variables: VariableItem[];
   confounds: string;
   design: string;
@@ -103,12 +107,15 @@ type Project = {
   samplePower: number;
   samplingMethod: string;
   attrition: number;
+  expectedInvalidRate: number;
+  recruitmentPerWeek: number;
   recruitment: string;
   methods: MethodItem[];
   procedure: string;
   pilotPlan: string;
   stoppingRule: string;
   preregistrationChecks: string[];
+  decisionLog: DecisionItem[];
   analysis: string;
   comparisonStructure: string;
   groupCount: string;
@@ -161,6 +168,7 @@ const defaultProject: Project = {
   searchQuery: "",
   literatureCriteria: "",
   evidenceGap: "",
+  evidenceItems: [],
   variables: [
     { id: "v1", name: "", role: "predictor", definition: "", indicator: "", scale: "quantitative", instrument: "" },
     { id: "v2", name: "", role: "outcome", definition: "", indicator: "", scale: "quantitative", instrument: "" },
@@ -192,12 +200,15 @@ const defaultProject: Project = {
   samplePower: 0.8,
   samplingMethod: "convenience",
   attrition: 15,
+  expectedInvalidRate: 10,
+  recruitmentPerWeek: 25,
   recruitment: "",
   methods: [],
   procedure: "",
   pilotPlan: "",
   stoppingRule: "Сбор завершается после достижения запланированного числа завершённых наблюдений; промежуточный просмотр основных эффектов не проводится.",
   preregistrationChecks: [],
+  decisionLog: [],
   analysis: "",
   comparisonStructure: "independent",
   groupCount: "2",
@@ -305,8 +316,11 @@ function sanitizeProject(value: unknown): Project {
   safe.experimentControls = (safe.experimentControls as unknown[]).filter((item): item is string => typeof item === "string").slice(0, experimentThreats.length);
   safe.sampleSize = Math.min(1_000_000, Math.max(1, Number(safe.sampleSize) || defaultProject.sampleSize));
   safe.attrition = Math.min(100, Math.max(0, Number(safe.attrition) || 0));
+  safe.expectedInvalidRate = Math.min(95, Math.max(0, Number(safe.expectedInvalidRate) || 0));
+  safe.recruitmentPerWeek = Math.min(1_000_000, Math.max(1, Number(safe.recruitmentPerWeek) || defaultProject.recruitmentPerWeek));
   safe.samplePower = Math.min(.999, Math.max(.5, Number(safe.samplePower) || defaultProject.samplePower));
   const records = (item: unknown) => Array.isArray(item) ? item.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)) : [];
+  const short = (item: unknown, fallback = "") => text(item, fallback).slice(0, 4_000);
   safe.hypotheses = records(safe.hypotheses).slice(0, 30).map((item) => ({
     id: text(item.id, uid()), text: text(item.text), type: ["directional", "non-directional", "null"].includes(text(item.type)) ? text(item.type) : "directional",
   }));
@@ -319,6 +333,17 @@ function sanitizeProject(value: unknown): Project {
     role: text(item.role, "Не указано"), source: text(item.source, "Источник не указан"), category: text(item.category, "Импорт"), items: text(item.items, "Уточнить"),
     fit: text(item.fit, "Требуется проверка"), caution: text(item.caution, "Проверить адаптацию, качество и условия использования."),
     url: /^https:\/\//i.test(text(item.url)) ? text(item.url) : "https://istina.msu.ru/",
+  }));
+  const currentYear = new Date().getFullYear();
+  safe.evidenceItems = records(safe.evidenceItems).slice(0, 100).map((item) => ({
+    id: short(item.id, uid()).slice(0, 80), citation: short(item.citation), year: Math.min(currentYear, Math.max(1900, Number(item.year) || currentYear)),
+    design: short(item.design), sample: short(item.sample), finding: short(item.finding), limitation: short(item.limitation), relevance: short(item.relevance),
+    stance: ["supports", "mixed", "contradicts", "context"].includes(short(item.stance)) ? short(item.stance) : "context",
+  }));
+  safe.decisionLog = records(safe.decisionLog).slice(0, 120).map((item) => ({
+    id: short(item.id, uid()).slice(0, 80), date: short(item.date).slice(0, 10), decision: short(item.decision), rationale: short(item.rationale),
+    timing: short(item.timing) === "after-data" ? "after-data" : "before-data",
+    status: ["planned", "adopted", "revised"].includes(short(item.status)) ? short(item.status) : "planned",
   }));
   const responseSource = safe.reviewResponses && typeof safe.reviewResponses === "object" && !Array.isArray(safe.reviewResponses)
     ? safe.reviewResponses as Record<string, unknown>
@@ -409,6 +434,7 @@ export default function ResearchConstructor() {
   const [methodSearch, setMethodSearch] = useState("");
   const [methodCategory, setMethodCategory] = useState("Все");
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [labOpen, setLabOpen] = useState(false);
   const [knowledgeSearch, setKnowledgeSearch] = useState("");
   const [knowledgeTab, setKnowledgeTab] = useState<KnowledgeTab>("terms");
   const [privateSession, setPrivateSession] = useState(false);
@@ -524,6 +550,9 @@ export default function ResearchConstructor() {
   }, []);
   const methodMinutes = project.methods.reduce((sum, method) => sum + method.minutes, 0);
   const topicAnalysis = useMemo(() => analyzeTopic(project.topic, project.requirementProfile, project.design), [project.topic, project.requirementProfile, project.design]);
+  const evidenceSummary = useMemo(() => evidenceHealth(project.evidenceItems), [project.evidenceItems]);
+  const recruitmentRisk = useMemo(() => buildRecruitmentStressScenario({ targetN: project.sampleSize, attritionRate: project.attrition, invalidRate: project.expectedInvalidRate, weeklyRate: project.recruitmentPerWeek, participantMinutes: methodMinutes }), [project.sampleSize, project.attrition, project.expectedInvalidRate, project.recruitmentPerWeek, methodMinutes]);
+  const identifierRisk = useMemo(() => findRepeatedIdentifierPath(project), [project]);
 
   const audit = useMemo(() => [
     { label: "Тема конкретна и соответствует выбранному профилю", ok: filled(project.topic) && topicAnalysis.score >= 60, step: "logic" as StepId, group: "Логика" },
@@ -536,6 +565,7 @@ export default function ResearchConstructor() {
     { label: "Поиск литературы можно воспроизвести", ok: filled(project.searchQuery) && project.databases.length >= 2, step: "evidence" as StepId, group: "Основания" },
     { label: "Сформулирован конкретный пробел в знаниях", ok: filled(project.evidenceGap), step: "evidence" as StepId, group: "Основания" },
     { label: "Ключевые конструкты определены теоретически", ok: filled(project.theory), step: "evidence" as StepId, group: "Основания" },
+    { label: "Источники разобраны по выводам, ограничениям и роли", ok: evidenceSummary.complete >= 3, step: "evidence" as StepId, group: "Основания" },
     { label: "Предиктор и исход операционализированы", ok: project.variables.some((v) => v.role === "predictor" && filled(v.name) && filled(v.indicator)) && project.variables.some((v) => v.role === "outcome" && filled(v.name) && filled(v.indicator)), step: "variables" as StepId, group: "Модель" },
     { label: "Для переменных указаны шкалы и инструменты", ok: project.variables.filter((v) => filled(v.name)).every((v) => filled(v.instrument) && Boolean(v.scale)), step: "variables" as StepId, group: "Модель" },
     { label: "Альтернативные объяснения перечислены", ok: filled(project.confounds), step: "variables" as StepId, group: "Модель" },
@@ -546,6 +576,7 @@ export default function ResearchConstructor() {
     { label: "Границы генеральной совокупности заданы", ok: filled(project.population), step: "sample" as StepId, group: "Выборка" },
     { label: "Критерии включения и исключения описаны", ok: filled(project.inclusion) && filled(project.exclusion), step: "sample" as StepId, group: "Выборка" },
     { label: "Объём, способ набора и запас на отсев заданы", ok: project.sampleSize >= 12 && filled(project.recruitment) && project.attrition >= 0, step: "sample" as StepId, group: "Выборка" },
+    { label: "Темп набора и доля непригодных данных учтены", ok: project.recruitmentPerWeek > 0 && project.expectedInvalidRate >= 0 && project.expectedInvalidRate <= 50, step: "sample" as StepId, group: "Выборка" },
     { label: "Методы соответствуют операционализациям", ok: project.methods.length > 0 && project.variables.some((v) => filled(v.instrument)), step: "methods" as StepId, group: "Измерение" },
     { label: "Нагрузка участника остаётся приемлемой", ok: methodMinutes > 0 && methodMinutes <= 35, step: "methods" as StepId, group: "Измерение" },
     { label: "Процедура описана по шагам", ok: filled(project.procedure), step: "protocol" as StepId, group: "Протокол" },
@@ -561,7 +592,7 @@ export default function ResearchConstructor() {
     { label: "Участнику подготовлен текст согласия", ok: filled(project.consent), step: "ethics" as StepId, group: "Этика" },
     { label: "Выбран стандарт отчётности", ok: Boolean(project.reportingStandard), step: "report" as StepId, group: "Отчёт" },
     { label: "Ограничения и распространение результатов описаны", ok: filled(project.limitations) && filled(project.dissemination), step: "report" as StepId, group: "Отчёт" },
-  ], [project, methodMinutes, topicAnalysis]);
+  ], [project, methodMinutes, topicAnalysis, evidenceSummary]);
 
   const qualitySignals = useMemo(() => {
     const signals: { level: "critical" | "warning" | "good"; title: string; text: string; step: StepId }[] = [];
@@ -574,6 +605,9 @@ export default function ResearchConstructor() {
     if (methodMinutes > 60) signals.push({ level: "critical", title: "Критическая нагрузка участника", text: `Около ${methodMinutes} минут без инструкций и пауз. Такой протокол резко повышает усталость, отсев и механические ответы.`, step: "methods" });
     else if (project.methods.length > 5 || methodMinutes > 35) signals.push({ level: "warning", title: "Перегруженная батарея", text: `Сейчас около ${methodMinutes} минут без инструкций. Усталость увеличит пропуски и случайные ответы.`, step: "methods" });
     if (project.sampleSize < Math.round(suggestedSample(project.sampleEffect, project.samplePower, project.design) * .8) && project.pathway === "quantitative") signals.push({ level: "warning", title: "Выборка ниже ориентира", text: "Проведите точный расчёт мощности под основной тест или честно ограничьте амбицию вывода.", step: "sample" });
+    if (recruitmentRisk.level === "critical") signals.push({ level: "critical", title: "Полевой сценарий не выдерживает стресс-тест", text: `При ухудшении набора потребуется около ${recruitmentRisk.stress.weeks} недель и ${recruitmentRisk.stress.invited} приглашений. Пересоберите канал набора, резерв или масштаб вывода.`, step: "sample" });
+    else if (recruitmentRisk.level === "warning") signals.push({ level: "warning", title: "Набор чувствителен к потерям", text: `Базовый план — ${recruitmentRisk.base.weeks} нед., стресс-сценарий — ${recruitmentRisk.stress.weeks} нед. Заранее зафиксируйте резервный канал.`, step: "sample" });
+    if (project.evidenceItems.length >= 3 && !evidenceSummary.hasCounterEvidence) signals.push({ level: "warning", title: "Матрица литературы слишком единодушна", text: "Все источники выглядят подтверждающими. Найдите конкурирующие результаты, альтернативную операционализацию или границы эффекта.", step: "evidence" });
     if (project.analysis === "regression" && project.variables.filter((v) => v.role === "predictor").length > Math.max(1, Math.floor(project.sampleSize / 15))) signals.push({ level: "critical", title: "Слишком много предикторов", text: "Модель рискует переобучиться. Сократите предикторы по теории или увеличьте выборку.", step: "analysis" });
     if (project.analysis === "mediation" && project.time === "cross-sectional") signals.push({ level: "warning", title: "Медиация в одном срезе", text: "Поперечные данные не устанавливают временной механизм. Формулируйте результат как косвенную статистическую связь.", step: "analysis" });
     if (project.time === "longitudinal" && project.attrition < 20) signals.push({ level: "warning", title: "Недооценён отсев в лонгитюде", text: "Повторные волны почти всегда теряют часть участников. Заложите резерв и заранее опишите анализ причин выбывания.", step: "sample" });
@@ -584,10 +618,11 @@ export default function ResearchConstructor() {
     if (project.design === "experimental" && !/случайн|рандом/i.test(project.assignmentPlan)) signals.push({ level: "warning", title: "Неясное распределение по условиям", text: "Опишите генерацию последовательности, сокрытие распределения и единицу рандомизации — либо честно обозначьте квазиэксперимент.", step: "design" });
     if (project.design === "experimental" && experimentReadiness({ manipulation: project.manipulation, controlCondition: project.controlCondition, assignmentPlan: project.assignmentPlan, counterbalancing: project.counterbalancing, manipulationCheck: project.manipulationCheck, fidelityPlan: project.fidelityPlan, qualityRules: project.qualityRules, experimentControls: project.experimentControls }).score < 50) signals.push({ level: "critical", title: "Причинный вывод пока не защищён", text: "Менее половины критических элементов эксперимента зафиксировано. Сначала закройте манипуляцию, контроль, распределение и контроль реализации.", step: "design" });
     if (project.dataSensitivity === "restricted" && project.setting === "online") signals.push({ level: "critical", title: "Чувствительные данные и обычный онлайн-сбор", text: "Остановитесь на уровне плана: нужна согласованная инфраструктура, формальная модель доступа и проверенная процедура инцидента.", step: "ethics" });
+    if (identifierRisk) signals.push({ level: "critical", title: "Похожее на список контактов содержимое", text: "В проекте найдено несколько e-mail или телефонных номеров. Удалите данные участников: конструктор предназначен только для плана и методических решений.", step: "ethics" });
     if (["paired", "repeated"].includes(project.analysis) && project.comparisonStructure === "independent") signals.push({ level: "critical", title: "Анализ не соответствует зависимости", text: "Парные и повторные наблюдения нельзя анализировать как независимые. Согласуйте единицу анализа, структуру данных и модель.", step: "analysis" });
     if (!signals.length && audit.filter((item) => item.ok).length / audit.length >= .7) signals.push({ level: "good", title: "Критических противоречий не найдено", text: "Теперь нужен содержательный разбор руководителя: автоматический аудит проверяет структуру, но не научную истинность.", step: "audit" });
     return signals;
-  }, [project, methodMinutes, audit, topicAnalysis]);
+  }, [project, methodMinutes, audit, topicAnalysis, recruitmentRisk, evidenceSummary, identifierRisk]);
 
   const done = audit.filter((item) => item.ok).length;
   const readiness = Math.round((done / audit.length) * 100);
@@ -607,10 +642,19 @@ export default function ResearchConstructor() {
     filled(project.procedure),
     filled(project.pilotPlan),
     project.time !== "longitudinal" || project.attrition >= 20,
+    recruitmentRisk.base.weeks <= 52 && project.expectedInvalidRate <= 40,
   ];
   const feasibility = Math.round(feasibilityChecks.filter(Boolean).length / feasibilityChecks.length * 100);
   const reviewAnswers = reviewerQuestions.filter((item) => filled(project.reviewResponses[item.id] || "")).length;
   const researchBrief = `${project.topic || "Тема пока не сформулирована"}. ${project.question ? `Вопрос: ${project.question}` : "Сначала зафиксируйте один исследовательский вопрос."} ${project.designRationale ? `Дизайн: ${project.designRationale}` : "Затем обоснуйте дизайн через вопрос, а не удобство."}`;
+  const traceNodes = [
+    { id: "question", label: "Вопрос", detail: "Один вопрос, на который отвечают данные", ok: filled(project.question), step: "logic" as StepId },
+    { id: "theory", label: "Механизм", detail: "Теория объясняет ожидаемую связь", ok: filled(project.theory) && filled(project.problem), step: "evidence" as StepId },
+    { id: "evidence", label: "Основания", detail: "Есть выводы, ограничения и контраргументы", ok: evidenceSummary.complete >= 3, step: "evidence" as StepId },
+    { id: "measure", label: "Измерение", detail: "Конструкты доведены до показателей", ok: project.variables.filter((item) => filled(item.name)).every((item) => filled(item.indicator) && filled(item.instrument)) && project.methods.length > 0, step: "variables" as StepId },
+    { id: "design", label: "Проверка", detail: "Дизайн отделяет гипотезу от альтернатив", ok: filled(project.designRationale) && filled(project.procedure), step: "design" as StepId },
+    { id: "analysis", label: "Вывод", detail: "Исход, анализ и границы заданы заранее", ok: filled(project.primaryOutcome) && Boolean(project.analysis) && filled(project.limitations), step: "analysis" as StepId },
+  ];
 
   const go = (id: StepId) => {
     setActive(id);
@@ -686,6 +730,7 @@ export default function ResearchConstructor() {
         `Теоретическая рамка: ${project.theory}`, `Ключевые слова: ${project.keywords}`,
         `Базы: ${project.databases.join(", ")}`, `Поисковый запрос: ${project.searchQuery}`,
         `Критерии отбора: ${project.literatureCriteria}`, `Пробел в знаниях: ${project.evidenceGap}`,
+        ...project.evidenceItems.map((item, index) => `Источник ${index + 1}: ${item.citation} (${item.year}); дизайн: ${item.design}; выборка/материал: ${item.sample}; вывод: ${item.finding}; ограничение: ${item.limitation}; роль: ${item.relevance}; позиция: ${item.stance}.`),
       ]),
       ...section("Переменные и операционализация", [
         ...project.variables.map((v) => `${v.name || "Переменная"} (${v.role}): ${v.definition}; показатель: ${v.indicator}; шкала: ${v.scale}; инструмент: ${v.instrument}.`),
@@ -702,11 +747,13 @@ export default function ResearchConstructor() {
         `Угрозы валидности: ${project.experimentControls.join("; ") || "не отмечены"}`, `Контроль артефактов: ${project.artifactPlan}`,
         `Генеральная совокупность: ${project.population}`, `Плановый объём: ${project.sampleSize}`,
         `Способ выборки: ${project.samplingMethod}; запас на отсев: ${project.attrition}%.`,
+        `Ожидаемо непригодных наблюдений: ${project.expectedInvalidRate}%; темп приглашений: ${project.recruitmentPerWeek} в неделю.`,
         `Включение: ${project.inclusion}`, `Исключение: ${project.exclusion}`, `Набор: ${project.recruitment}`,
       ]),
       ...section("Протокол", [
         `Процедура: ${project.procedure}`, `Пилот: ${project.pilotPlan}`, `Правило остановки: ${project.stoppingRule}`,
         `Пререгистрация: ${project.preregistrationChecks.join("; ") || "не заполнена"}`,
+        ...project.decisionLog.map((item, index) => `Решение ${index + 1} (${item.date || "без даты"}, ${item.timing}, ${item.status}): ${item.decision}; основание: ${item.rationale}.`),
       ]),
       ...section("Методы и анализ", [
         `Методы: ${project.methods.map((m) => m.name).join("; ") || "не выбраны"}`,
@@ -754,9 +801,11 @@ export default function ResearchConstructor() {
         const incoming = JSON.parse(String(reader.result));
         const restrictedPath = findRestrictedDatasetPath(incoming);
         if (restrictedPath) throw new Error(`Запрещённый массив данных: ${restrictedPath}`);
+        const identifierPath = findRepeatedIdentifierPath(incoming);
+        if (identifierPath) throw new Error(`Запрещённые идентификаторы: ${identifierPath}`);
         replaceProject(sanitizeProject(incoming));
         notify("Проект проверен и восстановлен");
-      } catch (error) { notify(error instanceof Error && error.message.includes("Запрещённый") ? "Импорт отклонён: похоже на данные участников" : "Не удалось прочитать файл"); }
+      } catch (error) { notify(error instanceof Error && error.message.includes("Запрещён") ? "Импорт отклонён: похоже на данные участников" : "Не удалось прочитать файл"); }
     };
     reader.readAsText(file);
     event.target.value = "";
@@ -801,6 +850,7 @@ export default function ResearchConstructor() {
             <button className="icon-button" disabled={!historyState.redo} onClick={redo} title="Вернуть изменение" aria-label="Вернуть изменение"><Redo2 size={17} /></button>
           </div>
           <button className="button button--ghost command-button" onClick={() => setCommandOpen(true)}><Command size={17} /> Быстрый переход <kbd>Ctrl K</kbd></button>
+          <button className="button button--ghost radar-button" onClick={() => setLabOpen(true)}><Gauge size={17} /> Радар проекта</button>
           <button className="button button--ghost" onClick={() => setKnowledgeOpen(true)}><LibraryBig size={17} /> Справочник</button>
           <button className={privateSession ? "button button--private" : "button button--ghost"} onClick={togglePrivateSession}><LockKeyhole size={17} /> {privateSession ? "Сохранить локально" : "Приватная сессия"}</button>
           <button className="button button--ghost privacy-shield-button" onClick={() => setPrivacyShield(true)}><EyeOff size={17} /> Скрыть экран</button>
@@ -828,6 +878,7 @@ export default function ResearchConstructor() {
         </nav>
         <div className="sidebar__tools">
           <button onClick={() => { setMobileOpen(false); setCommandOpen(true); }}><Command size={16} /> Быстрый переход</button>
+          <button onClick={() => { setMobileOpen(false); setLabOpen(true); }}><Gauge size={16} /> Радар проекта</button>
           <button onClick={() => importRef.current?.click()}><Upload size={16} /> Импорт JSON</button>
           <button onClick={exportJson}><FileJson size={16} /> Полная резервная копия</button>
           <button onClick={exportSafeJson}><ShieldCheck size={16} /> Безопасная копия</button>
@@ -841,6 +892,7 @@ export default function ResearchConstructor() {
 
       <main className="workspace">
         <div className="workspace__main">
+          {active !== "overview" && <div className="orientation-strip"><div><span>Сейчас: {steps.find((step) => step.id === active)?.label}</span><strong>{routeDescription(active)}</strong></div><button onClick={() => setLabOpen(true)}>Проверить связи <Gauge size={15} /></button></div>}
           {active === "overview" && (
             <>
               <section className="hero">
@@ -871,6 +923,7 @@ export default function ResearchConstructor() {
                   </div>
                 </div>
                 <div className="live-brief"><div><span className="eyebrow">Живое резюме</span><p>{researchBrief}</p></div><button className="button button--ghost" onClick={async () => { await navigator.clipboard.writeText(researchBrief); notify("Краткое резюме скопировано"); }}><Copy size={16} /> Копировать</button></div>
+                <button className="radar-launch" onClick={() => setLabOpen(true)}><span><Gauge size={22} /></span><div><small>Новый инструмент</small><strong>Открыть исследовательский радар</strong><p>Проверить цепочку вывода, сроки набора и историю решений в одном месте.</p></div><ArrowRight /></button>
               </section>
               <section className="content-section quick-start">
                 <SectionHead eyebrow="Быстрый старт" title="Начните со структуры, а не с пустого экрана" text="Сценарий не пишет содержание за вас. Он выставляет согласованный маршрут, тип дизайна, основу анализа и объём планирования." />
@@ -955,7 +1008,8 @@ export default function ResearchConstructor() {
 
       <nav className="mobile-phase-nav" aria-label="Этапы проекта">{workflowPhases.map((phase) => <button key={phase.title} className={phase.ids.includes(active) ? "active" : ""} onClick={() => go(phase.ids[0])}><span>{phase.title}</span></button>)}</nav>
       <footer className="site-footer"><div className="footer-identity"><span className="footer-psi">Ψ</span><div><b>Конструктор исследования</b><p>Психологическая методология, проектирование и проверка связности.</p></div></div><div className="footer-links"><span>Экосистема</span><a href="https://psy-msutf.vercel.app/ru" target="_blank" rel="noreferrer">Научный сектор психологии <ArrowRight size={14} /></a><a href="https://t.me/psy_msutf" target="_blank" rel="noreferrer">Telegram · @psy_msutf <ArrowRight size={14} /></a></div><div className="footer-author"><span>Создатель</span><a href="https://t.me/speway" target="_blank" rel="noreferrer">spw · @speway <ArrowRight size={14} /></a><small>Ташкентский филиал МГУ · 2026</small></div><strong className="footer-warning">Запрещено основывать работу на созданных вами здесь заметках, формулировках и решениях или использовать их без проверки и одобрения научного руководителя. Это не улучшит работу — только повысит риск методологических ошибок и сделает хуже прежде всего вам.</strong></footer>
-      {commandOpen && <CommandCenter query={commandQuery} setQuery={setCommandQuery} close={() => { setCommandOpen(false); setCommandQuery(""); }} go={go} nextStep={nextActions[0]?.step || "audit"} openKnowledge={() => { setCommandOpen(false); setKnowledgeOpen(true); }} exportDocx={exportDocx} exportSafeJson={exportSafeJson} hideScreen={() => { setCommandOpen(false); setPrivacyShield(true); }} />}
+      {commandOpen && <CommandCenter query={commandQuery} setQuery={setCommandQuery} close={() => { setCommandOpen(false); setCommandQuery(""); }} go={go} nextStep={nextActions[0]?.step || "audit"} openKnowledge={() => { setCommandOpen(false); setKnowledgeOpen(true); }} openLab={() => { setCommandOpen(false); setLabOpen(true); }} exportDocx={exportDocx} exportSafeJson={exportSafeJson} hideScreen={() => { setCommandOpen(false); setPrivacyShield(true); }} />}
+      {labOpen && <ResearchLab project={project} update={update} close={() => setLabOpen(false)} go={go} traceNodes={traceNodes} readiness={readiness} feasibility={feasibility} />}
       {knowledgeOpen && <KnowledgeCenter search={knowledgeSearch} setSearch={setKnowledgeSearch} tab={knowledgeTab} setTab={setKnowledgeTab} close={() => setKnowledgeOpen(false)} />}
       {privacyShield && <div className="privacy-shield" role="dialog" aria-modal="true" aria-label="Содержимое скрыто"><div><span>Ψ</span><h2>Содержимое скрыто</h2><p>Проект остаётся открыт в этой вкладке, но текст не виден на экране.</p><button className="button button--amber" onClick={() => setPrivacyShield(false)}>Вернуться к проекту</button></div></div>}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
@@ -967,7 +1021,7 @@ function routeDescription(id: StepId) {
   return ({ logic: "Проблема, цель, задачи и гипотезы", evidence: "Поиск, теория и реальный пробел", variables: "Роли, показатели и схема связей", design: "Тип, время и границы вывода", sample: "Кого, сколько и как набирать", methods: "Батарея и качество измерения", protocol: "Пошаговая процедура и пререгистрация", analysis: "Основной тест, эффекты и предпосылки", ethics: "Согласие, риски и хранение", report: "Стандарт, ограничения и защита", audit: "Связность и готовность к обсуждению" } as Partial<Record<StepId, string>>)[id] || "";
 }
 
-function CommandCenter({ query, setQuery, close, go, nextStep, openKnowledge, exportDocx, exportSafeJson, hideScreen }: { query: string; setQuery: (value: string) => void; close: () => void; go: (id: StepId) => void; nextStep: StepId; openKnowledge: () => void; exportDocx: () => void; exportSafeJson: () => void; hideScreen: () => void }) {
+function CommandCenter({ query, setQuery, close, go, nextStep, openKnowledge, openLab, exportDocx, exportSafeJson, hideScreen }: { query: string; setQuery: (value: string) => void; close: () => void; go: (id: StepId) => void; nextStep: StepId; openKnowledge: () => void; openLab: () => void; exportDocx: () => void; exportSafeJson: () => void; hideScreen: () => void }) {
   const closeRef = useRef(close);
   useEffect(() => { closeRef.current = close; });
   useEffect(() => {
@@ -980,6 +1034,7 @@ function CommandCenter({ query, setQuery, close, go, nextStep, openKnowledge, ex
   const actions = [
     { id: "next", title: "Перейти к следующему разрыву", text: "Открыть первую незакрытую контрольную точку", icon: Target, run: () => go(nextStep) },
     { id: "audit", title: "Запустить стресс-рецензию", text: "Проверить альтернативы, устойчивость и границы вывода", icon: Gauge, run: () => go("audit") },
+    { id: "radar", title: "Открыть радар проекта", text: "Связность, полевой стресс-тест и журнал решений", icon: Network, run: openLab },
     { id: "knowledge", title: "Открыть научный справочник", text: "Термины, методы, стандарты и экспериментальные угрозы", icon: LibraryBig, run: openKnowledge },
     { id: "safe", title: "Скачать безопасную копию", text: "JSON без руководителя, набора, согласия и служебных деталей", icon: ShieldCheck, run: exportSafeJson },
     { id: "docx", title: "Собрать DOCX", text: "Выгрузить полный проект для обсуждения", icon: FileText, run: exportDocx },
@@ -990,6 +1045,38 @@ function CommandCenter({ query, setQuery, close, go, nextStep, openKnowledge, ex
 }
 
 type StepProps = { project: Project; update: <K extends keyof Project>(key: K, value: Project[K]) => void };
+
+type TraceNode = { id: string; label: string; detail: string; ok: boolean; step: StepId };
+
+function ResearchLab({ project, update, close, go, traceNodes, readiness, feasibility }: StepProps & { close: () => void; go: (id: StepId) => void; traceNodes: TraceNode[]; readiness: number; feasibility: number }) {
+  const [tab, setTab] = useState<"trace" | "field" | "decisions">("trace");
+  const closeRef = useRef(close);
+  const scenario = buildRecruitmentStressScenario({ targetN: project.sampleSize, attritionRate: project.attrition, invalidRate: project.expectedInvalidRate, weeklyRate: project.recruitmentPerWeek, participantMinutes: project.methods.reduce((sum, method) => sum + method.minutes, 0) });
+  const matrix = evidenceHealth(project.evidenceItems);
+  const traceReady = traceNodes.filter((node) => node.ok).length;
+  const claimContract = project.design === "experimental"
+    ? { allowed: "Осторожная оценка причинного эффекта — только при выполненной манипуляции, корректном распределении и контроле реализации.", forbidden: "Нельзя скрывать нарушения рандомизации, fidelity и остаточные альтернативные объяснения." }
+    : project.design === "qualitative"
+      ? { allowed: "Описание опыта, смыслов, процессов и контекстных механизмов с явной аналитической позицией.", forbidden: "Нельзя превращать насыщенное описание в статистическое обобщение на популяцию." }
+      : { allowed: "Связь, различия, прогноз или временная динамика в границах наблюдаемой выборки и дизайна.", forbidden: "Нельзя автоматически писать «влияет», «вызывает» или «определяет» без причинной идентификации." };
+  useEffect(() => { closeRef.current = close; });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") closeRef.current(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+  const jump = (step: StepId) => { close(); go(step); };
+  return <div className="research-lab-overlay" role="dialog" aria-modal="true" aria-label="Радар исследовательского проекта"><button className="research-lab-scrim" onClick={close} aria-label="Закрыть радар проекта" /><aside className="research-lab-panel">
+    <div className="research-lab-head"><div><span className="eyebrow eyebrow--light">Исследовательский радар</span><h2>Проект как система, а не набор заполненных полей</h2><p>Проверяйте цепочку вывода, реальный полевой план и историю решений отдельно.</p></div><button className="icon-button" onClick={close} aria-label="Закрыть"><X /></button></div>
+    <div className="research-lab-scores"><div><span>Каркас</span><strong>{readiness}%</strong></div><div><span>Реализуемость</span><strong>{feasibility}%</strong></div><div><span>Связность</span><strong>{traceReady}/{traceNodes.length}</strong></div></div>
+    <div className="research-lab-tabs"><button className={tab === "trace" ? "active" : ""} onClick={() => setTab("trace")}>Цепочка вывода</button><button className={tab === "field" ? "active" : ""} onClick={() => setTab("field")}>Полевой стресс-тест</button><button className={tab === "decisions" ? "active" : ""} onClick={() => setTab("decisions")}>История решений</button></div>
+    <div className="research-lab-body">
+      {tab === "trace" && <><div className="trace-intro"><div><strong>{traceReady === traceNodes.length ? "Цепочка собрана" : `${traceNodes.length - traceReady} разрыва требуют внимания`}</strong><p>Каждый переход должен быть объясним: почему из теории следует показатель, а из показателя — именно такой вывод.</p></div><span>{Math.round(traceReady / traceNodes.length * 100)}%</span></div><div className="trace-chain">{traceNodes.map((node, index) => <button key={node.id} className={node.ok ? "trace-node trace-node--ok" : "trace-node"} onClick={() => jump(node.step)}><span>{node.ok ? <Check size={16} /> : String(index + 1).padStart(2, "0")}</span><div><strong>{node.label}</strong><small>{node.detail}</small></div><ArrowRight size={16} /></button>)}</div><div className="trace-evidence"><div><span>Матрица литературы</span><strong>{matrix.score}%</strong><small>{matrix.complete} полностью разобранных источника</small></div><div><span>Контраргумент</span><strong>{matrix.hasCounterEvidence ? "есть" : "не найден"}</strong><small>{matrix.hasCounterEvidence ? "Присутствует смешанный или противоречащий результат" : "Добавьте источник, который мешает красивой истории"}</small></div><button onClick={() => jump("evidence")}>Открыть матрицу <ArrowRight size={15} /></button></div><div className="claim-contract"><div><span>Разрешённый язык вывода</span><p>{claimContract.allowed}</p></div><div><span>Методологический стоп</span><p>{claimContract.forbidden}</p></div></div></>}
+      {tab === "field" && <><div className={`stress-verdict stress-verdict--${scenario.level}`}><Gauge /><div><span>Вердикт стресс-теста</span><h3>{scenario.level === "critical" ? "План может сорваться" : scenario.level === "warning" ? "План чувствителен к потерям" : "План имеет рабочий резерв"}</h3><p>Стресс-сценарий: +15 п.п. отсева, +10 п.п. непригодных наблюдений и −30% темпа набора.</p></div></div><div className="lab-inputs"><Field label="Целевой анализируемый N"><input type="number" min={1} value={project.sampleSize} onChange={(event) => update("sampleSize", Number(event.target.value))} /></Field><Field label="Отсев, %"><input type="number" min={0} max={95} value={project.attrition} onChange={(event) => update("attrition", Number(event.target.value))} /></Field><Field label="Непригодные данные, %"><input type="number" min={0} max={95} value={project.expectedInvalidRate} onChange={(event) => update("expectedInvalidRate", Number(event.target.value))} /></Field><Field label="Приглашений в неделю"><input type="number" min={1} value={project.recruitmentPerWeek} onChange={(event) => update("recruitmentPerWeek", Number(event.target.value))} /></Field></div><div className="scenario-compare"><article><span>Базовый сценарий</span><strong>{scenario.base.weeks} нед.</strong><b>{scenario.base.invited} приглашений</b><small>{scenario.base.participantHours} ч суммарной нагрузки участников</small></article><article><span>Стресс-сценарий</span><strong>{scenario.stress.weeks} нед.</strong><b>{scenario.stress.invited} приглашений</b><small>Темп {scenario.stress.weeklyRate}/нед., потери {scenario.stress.attritionRate}% + {scenario.stress.invalidRate}%</small></article></div><button className="button button--ink" onClick={() => jump("sample")}>Доработать выборку <ArrowRight size={16} /></button></>}
+      {tab === "decisions" && <><div className="decision-radar-head"><div><strong>{project.decisionLog.length ? `${project.decisionLog.length} решений записано` : "Журнал пока пуст"}</strong><p>После просмотра данных изменение не запрещено — запрещено маскировать его под первоначальный план.</p></div><button className="button button--soft" onClick={() => jump("protocol")}><Plus size={16} /> Добавить запись</button></div><div className="decision-radar-list">{project.decisionLog.slice(-5).reverse().map((item) => <article key={item.id}><span>{item.date || "без даты"}</span><strong>{item.decision || "Решение ещё не сформулировано"}</strong><p>{item.rationale || "Основание не записано"}</p><small>{item.timing === "after-data" ? "после просмотра данных" : "до просмотра данных"} · {item.status === "revised" ? "пересмотрено" : item.status === "adopted" ? "принято" : "запланировано"}</small></article>)}</div>{!project.decisionLog.length && <div className="decision-empty"><ListChecks /><div><strong>Начните с первого изменения</strong><p>Например: решение после пилота, замечание руководителя или вынужденная замена метода.</p></div></div>}</>}
+    </div>
+  </aside></div>;
+}
 
 function LogicStep({ project, update }: StepProps) {
   const setHypothesis = (id: string, patch: Partial<Hypothesis>) => update("hypotheses", project.hypotheses.map((item) => item.id === id ? { ...item, ...patch } : item));
@@ -1020,6 +1107,10 @@ function LogicStep({ project, update }: StepProps) {
 function EvidenceStep({ project, update }: StepProps) {
   const databases = ["ИСТИНА МГУ", "eLIBRARY", "Google Scholar", "PsycINFO", "PubMed", "CyberLeninka"];
   const toggle = (item: string) => update("databases", project.databases.includes(item) ? project.databases.filter((v) => v !== item) : [...project.databases, item]);
+  const setEvidence = (id: string, patch: Partial<EvidenceItem>) => update("evidenceItems", project.evidenceItems.map((item) => item.id === id ? { ...item, ...patch } : item));
+  const addEvidence = () => update("evidenceItems", [...project.evidenceItems, { id: uid(), citation: "", year: new Date().getFullYear(), design: "", sample: "", finding: "", limitation: "", relevance: "", stance: "context" }]);
+  const matrix = evidenceHealth(project.evidenceItems);
+  const stanceNames: Record<EvidenceItem["stance"], string> = { supports: "Поддерживает ожидание", mixed: "Смешанный результат", contradicts: "Противоречит", context: "Даёт контекст" };
   return <section className="content-section step-page">
     <SectionHead eyebrow="Блок 03 · основания" title="Постройте теоретическую рамку и найдите реальный пробел" text="Сначала реконструируйте подходы и понятия, затем сопоставьте современные обзоры и первичные исследования. Список найденных статей ещё не является теоретической главой." />
     <div className="evidence-layers">{[
@@ -1038,6 +1129,14 @@ function EvidenceStep({ project, update }: StepProps) {
       <Field label="Пробел в знаниях" hint="Чего именно не позволяют решить уже опубликованные работы" wide><textarea rows={4} placeholder="Не «мало исследований», а противоречие, неизвестный механизм, непроверенная граница или проблема измерения" value={project.evidenceGap} onChange={(e) => update("evidenceGap", e.target.value)} /></Field>
     </div>
     <div className="database-picks"><span>Где искать</span>{databases.map((item) => <button key={item} className={project.databases.includes(item) ? "chip chip--active" : "chip"} onClick={() => toggle(item)}>{project.databases.includes(item) && <Check size={14} />}{item}</button>)}</div>
+    <div className="evidence-matrix-head"><div><span className="eyebrow">Рабочая матрица</span><h3>Не склад ссылок, а карта доказательств</h3><p>Для каждой работы зафиксируйте вывод, ограничение и то, зачем она нужна именно вашему вопросу.</p></div><div className="evidence-matrix-score"><strong>{matrix.score}%</strong><span>{matrix.complete} полных из {matrix.total}</span></div></div>
+    <div className="evidence-matrix">{project.evidenceItems.map((item, index) => <article className="evidence-record" key={item.id}>
+      <div className="evidence-record__head"><span>S{String(index + 1).padStart(2, "0")}</span><select aria-label={`Роль источника ${index + 1}`} value={item.stance} onChange={(event) => setEvidence(item.id, { stance: event.target.value as EvidenceItem["stance"] })}>{Object.entries(stanceNames).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select><button className="icon-button" onClick={() => update("evidenceItems", project.evidenceItems.filter((source) => source.id !== item.id))} aria-label={`Удалить источник ${index + 1}`}><Trash2 size={16} /></button></div>
+      <div className="form-grid"><Field label="Ссылка / авторы" wide><input value={item.citation} onChange={(event) => setEvidence(item.id, { citation: event.target.value })} placeholder="Автор, год, название или DOI" /></Field><Field label="Год"><input type="number" min={1900} max={new Date().getFullYear()} value={item.year} onChange={(event) => setEvidence(item.id, { year: Number(event.target.value) })} /></Field><Field label="Дизайн"><input value={item.design} onChange={(event) => setEvidence(item.id, { design: event.target.value })} placeholder="Лонгитюд, эксперимент, обзор…" /></Field><Field label="Выборка / материал" wide><input value={item.sample} onChange={(event) => setEvidence(item.id, { sample: event.target.value })} placeholder="N, возраст, контекст или корпус" /></Field><Field label="Главный вывод" wide><textarea rows={2} value={item.finding} onChange={(event) => setEvidence(item.id, { finding: event.target.value })} /></Field><Field label="Ограничение" wide><textarea rows={2} value={item.limitation} onChange={(event) => setEvidence(item.id, { limitation: event.target.value })} /></Field><Field label="Роль в вашей работе" wide><textarea rows={2} value={item.relevance} onChange={(event) => setEvidence(item.id, { relevance: event.target.value })} placeholder="Как меняет гипотезу, дизайн или границы вывода?" /></Field></div>
+    </article>)}</div>
+    {!project.evidenceItems.length && <div className="evidence-empty"><LibraryBig /><div><strong>Матрица пока пустая</strong><p>Добавьте хотя бы три ключевые работы: подтверждающую, ограничивающую и конкурирующую.</p></div></div>}
+    <button className="button button--soft add-wide" onClick={addEvidence}><Plus size={16} /> Добавить источник в матрицу</button>
+    {project.evidenceItems.length >= 3 && !matrix.hasCounterEvidence && <div className="conflict-note"><CircleHelp /><p><b>Слишком гладкая картина.</b> В матрице пока нет смешанного или противоречащего результата. Ищите не только подтверждение — иначе обзор быстро превращается в адвоката собственной гипотезы.</p></div>}
     <div className="msu-note"><LibraryBig /><div><b>Опора МГУ</b><p>Проверяйте понятия по первоисточникам и работам научной школы, а современное состояние проблемы — по обзорам и актуальным эмпирическим данным. Не подменяйте теоретическое объяснение набором корреляций.</p><a href="https://istina.msu.ru/publications/book/509770/" target="_blank" rel="noreferrer">«Методологические основы психологии» — Т. В. Корнилова, С. Д. Смирнов <ArrowRight size={15} /></a></div></div>
   </section>;
 }
@@ -1108,7 +1207,7 @@ function DesignStep({ project, update }: StepProps) {
 
 function SampleStep({ project, update, estimated }: StepProps & { estimated: number }) {
   const nonPower = project.pathway === "qualitative" || project.pathway === "review" || project.pathway === "psychometric";
-  const invitationTarget = Math.ceil(project.sampleSize / Math.max(.05, 1 - project.attrition / 100));
+  const scenario = buildRecruitmentStressScenario({ targetN: project.sampleSize, attritionRate: project.attrition, invalidRate: project.expectedInvalidRate, weeklyRate: project.recruitmentPerWeek, participantMinutes: project.methods.reduce((sum, method) => sum + method.minutes, 0) });
   return <section className="content-section step-page"><SectionHead eyebrow="Блок 06" title="Спроектируйте выборку, а не просто число" text="Опишите, на кого распространяется вопрос, кто реально попадёт в данные и почему такой объём достаточен." />
     <div className="sample-layout"><div className="form-card form-grid">
       <Field label="Генеральная совокупность" wide><textarea rows={2} placeholder="Например: студенты очной формы 18–24 лет российских вузов" value={project.population} onChange={(e) => update("population", e.target.value)} /></Field>
@@ -1116,14 +1215,17 @@ function SampleStep({ project, update, estimated }: StepProps & { estimated: num
       <Field label="Критерии исключения"><textarea rows={4} placeholder="Дубли, незавершённые анкеты…" value={project.exclusion} onChange={(e) => update("exclusion", e.target.value)} /></Field>
       <Field label="Способ выборки"><select value={project.samplingMethod} onChange={(e) => update("samplingMethod", e.target.value)}><option value="convenience">Доступная</option><option value="purposeful">Целевая</option><option value="snowball">Снежный ком</option><option value="stratified">Стратифицированная</option><option value="cluster">Кластерная</option><option value="probability">Вероятностная</option><option value="theoretical">Теоретическая / информационная</option></select></Field>
       <Field label="Запас на отсев, %"><input type="number" min={0} max={90} value={project.attrition} onChange={(e) => update("attrition", Number(e.target.value))} /></Field>
+      <Field label="Ожидаемо непригодных, %" hint="Дубли, технические сбои, заранее заданные правила качества"><input type="number" min={0} max={90} value={project.expectedInvalidRate} onChange={(e) => update("expectedInvalidRate", Number(e.target.value))} /></Field>
+      <Field label="Реальный темп приглашений в неделю"><input type="number" min={1} value={project.recruitmentPerWeek} onChange={(e) => update("recruitmentPerWeek", Number(e.target.value))} /></Field>
       <Field label="Стратегия набора" wide><textarea rows={3} placeholder="Где искать участников, как приглашать, будет ли вознаграждение" value={project.recruitment} onChange={(e) => update("recruitment", e.target.value)} /></Field>
     </div><div className="calculator">
       <span className="eyebrow eyebrow--light">Оценка для планирования</span><h3>Размер выборки</h3><p>Ориентир, не замена расчёту мощности под конкретный статистический тест.</p>
       {!nonPower && <><Field label="Ожидаемый эффект"><select value={project.sampleEffect} onChange={(e) => update("sampleEffect", e.target.value)}><option value="small">Малый</option><option value="medium">Средний</option><option value="large">Большой</option></select></Field><Field label="Желаемая мощность"><select value={project.samplePower} onChange={(e) => update("samplePower", Number(e.target.value))}><option value={0.8}>0,80</option><option value={0.9}>0,90</option></select></Field><div className="estimate"><span>грубый ориентир</span><strong>≈ {estimated}</strong><small>завершённых наблюдений</small></div></>}
       {nonPower && <div className="estimate estimate--text"><strong>{project.pathway === "qualitative" ? "Информационная достаточность" : project.pathway === "review" ? "Корпус источников" : "Модель измерения"}</strong><small>{project.pathway === "qualitative" ? "Обоснуйте разнообразие случаев, глубину материала и информационную силу." : project.pathway === "review" ? "Число определяется поиском и критериями, а не мощностью участников." : "Планируйте под сложность факторной модели, точность и независимую проверку."}</small></div>}
       <Field label="Плановый объём"><input type="number" min={1} value={project.sampleSize} onChange={(e) => update("sampleSize", Number(e.target.value))} /></Field>
-      <p className="calculator__note">При отсеве {project.attrition}% пригласите не менее ≈ {invitationTarget}. Не меняйте правило остановки после просмотра основных эффектов.</p>
+      <p className="calculator__note">С учётом отсева и непригодных наблюдений потребуется ≈ {scenario.base.invited} приглашений. Не меняйте правило остановки после просмотра основных эффектов.</p>
     </div></div>
+    <div className={`field-stress field-stress--${scenario.level}`}><div><span className="eyebrow eyebrow--light">Полевой стресс-тест</span><h3>{scenario.level === "critical" ? "План набора хрупкий" : scenario.level === "warning" ? "Нужен резервный канал" : "План выдерживает ухудшение"}</h3><p>Симуляция не обещает реальный темп. Она показывает, что произойдёт, если отсев вырастет на 15 п.п., непригодные данные — на 10 п.п., а набор замедлится на 30%.</p></div><div className="field-stress__metrics"><article><span>Базовый план</span><strong>{scenario.base.weeks} нед.</strong><small>{scenario.base.invited} приглашений</small></article><article><span>Стресс-сценарий</span><strong>{scenario.stress.weeks} нед.</strong><small>{scenario.stress.invited} приглашений</small></article><article><span>Нагрузка участников</span><strong>{scenario.base.participantHours} ч</strong><small>суммарное время прохождения</small></article></div></div>
     <Tip>Для итогового обоснования укажите тест, ожидаемый эффект и его источник, α, мощность, число групп/предикторов и запас на потерю данных.</Tip>
   </section>;
 }
@@ -1143,10 +1245,15 @@ function MethodsStep({ project, update, search, setSearch, totalMinutes, categor
 function ProtocolStep({ project, update }: StepProps) {
   const items = ["Вопросы и гипотезы", "Первичный исход", "Размер и правило остановки", "Критерии исключения", "Процедура и порядок", "Основной анализ", "Пропуски и выбросы", "Разведочные анализы отдельно"];
   const toggle = (item: string) => update("preregistrationChecks", project.preregistrationChecks.includes(item) ? project.preregistrationChecks.filter((v) => v !== item) : [...project.preregistrationChecks, item]);
+  const setDecision = (id: string, patch: Partial<DecisionItem>) => update("decisionLog", project.decisionLog.map((item) => item.id === id ? { ...item, ...patch } : item));
+  const addDecision = () => update("decisionLog", [...project.decisionLog, { id: uid(), date: new Date().toISOString().slice(0, 10), decision: "", rationale: "", timing: "before-data", status: "planned" }]);
   return <section className="content-section step-page"><SectionHead eyebrow="Блок 08" title="Сделайте процедуру воспроизводимой" text="Другой исследователь должен понять, что происходит с участником или материалом от приглашения до готовой таблицы — без догадок и устных уточнений." />
     <div className="protocol-flow">{["Приглашение", "Согласие", "Инструкция", "Задания", "Дебрифинг", "Подготовка данных"].map((item, i) => <span key={item}><b>{i + 1}</b>{item}</span>)}</div>
     <div className="form-card form-grid"><Field label="Пошаговая процедура" hint="Порядок, длительность, рандомизация, перерывы, инструкции, дебрифинг" wide><textarea rows={7} value={project.procedure} onChange={(e) => update("procedure", e.target.value)} /></Field><Field label="Пилотирование" hint="Что проверяете и что будет основанием для изменения"><textarea rows={4} value={project.pilotPlan} onChange={(e) => update("pilotPlan", e.target.value)} /></Field><Field label="Правило завершения сбора" hint="Фиксированный N, дата или обоснованный критерий достаточности"><textarea rows={4} value={project.stoppingRule} onChange={(e) => update("stoppingRule", e.target.value)} /></Field></div>
     <div className="prereg-card"><div><span className="eyebrow">До просмотра исходов</span><h3>Пакет пререгистрации</h3><p>{project.preregistrationChecks.length} из {items.length} решений зафиксировано</p></div><div>{items.map((item) => <label className="light-check" key={item}><input type="checkbox" checked={project.preregistrationChecks.includes(item)} onChange={() => toggle(item)} /><span><Check size={14} /></span>{item}</label>)}</div></div>
+    <div className="decision-log-head"><div><span className="eyebrow">Журнал решений</span><h3>Исследовательская память без переписывания прошлого</h3><p>План можно менять. Журнал сохраняет, что изменилось, почему и было ли это до или после просмотра данных.</p></div><button className="button button--soft" onClick={addDecision}><Plus size={16} /> Записать решение</button></div>
+    <div className="decision-log">{project.decisionLog.map((item, index) => <article key={item.id}><div className="decision-log__head"><span>D{String(index + 1).padStart(2, "0")}</span><input type="date" aria-label={`Дата решения ${index + 1}`} value={item.date} onChange={(event) => setDecision(item.id, { date: event.target.value })} /><select aria-label={`Момент решения ${index + 1}`} value={item.timing} onChange={(event) => setDecision(item.id, { timing: event.target.value as DecisionItem["timing"] })}><option value="before-data">До просмотра данных</option><option value="after-data">После просмотра данных</option></select><select aria-label={`Статус решения ${index + 1}`} value={item.status} onChange={(event) => setDecision(item.id, { status: event.target.value as DecisionItem["status"] })}><option value="planned">Запланировано</option><option value="adopted">Принято</option><option value="revised">Пересмотрено</option></select><button className="icon-button" aria-label={`Удалить решение ${index + 1}`} onClick={() => update("decisionLog", project.decisionLog.filter((decision) => decision.id !== item.id))}><Trash2 size={16} /></button></div><Field label="Что решено" wide><textarea rows={2} value={item.decision} onChange={(event) => setDecision(item.id, { decision: event.target.value })} placeholder="Например: заменить основной тест на модель Уэлча" /></Field><Field label="Основание и влияние на вывод" wide><textarea rows={2} value={item.rationale} onChange={(event) => setDecision(item.id, { rationale: event.target.value })} placeholder="Что стало основанием и меняет ли решение подтверждающий статус анализа?" /></Field></article>)}</div>
+    {!project.decisionLog.length && <div className="decision-empty"><ListChecks /><div><strong>Пока решений нет</strong><p>Записывайте сюда изменения после пилота, замечаний руководителя и технических ограничений.</p></div></div>}
     <Tip>Изменить план можно. Нельзя скрыть изменение: отметьте, что и почему было изменено, и отделите подтверждающий анализ от разведочного.</Tip>
   </section>;
 }

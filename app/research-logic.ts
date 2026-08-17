@@ -61,6 +61,37 @@ export function findRestrictedDatasetPath(value: unknown): string | null {
   return null;
 }
 
+const emailPattern = /[\w.+-]+@[\w.-]+\.[a-zа-я]{2,}/giu;
+const phonePattern = /(?:\+?\d[\s().-]*){9,15}/g;
+
+export function findRepeatedIdentifierPath(value: unknown): string | null {
+  const stack: Array<{ value: unknown; path: string; depth: number }> = [{ value, path: "project", depth: 0 }];
+  const seen = new WeakSet<object>();
+  let identifiers = 0;
+  let visited = 0;
+  while (stack.length) {
+    const current = stack.pop()!;
+    visited += 1;
+    if (visited > 10_000 || current.depth > 12) return `${current.path} (слишком сложная структура)`;
+    if (typeof current.value === "string") {
+      const emails = current.value.match(emailPattern)?.length ?? 0;
+      const phones = current.value.match(phonePattern)?.length ?? 0;
+      identifiers += emails + phones;
+      if (identifiers > 2) return current.path;
+      continue;
+    }
+    if (!current.value || typeof current.value !== "object") continue;
+    if (seen.has(current.value)) continue;
+    seen.add(current.value);
+    if (Array.isArray(current.value)) {
+      current.value.slice(0, 501).forEach((entry, index) => stack.push({ value: entry, path: `${current.path}[${index}]`, depth: current.depth + 1 }));
+      continue;
+    }
+    for (const [key, entry] of Object.entries(current.value as Record<string, unknown>)) stack.push({ value: entry, path: `${current.path}.${key}`, depth: current.depth + 1 });
+  }
+  return null;
+}
+
 export function experimentReadiness(fields: Record<string, string | string[]>): { score: number; missing: string[] } {
   const checks: Array<[string, boolean]> = [
     ["манипуляция и уровни", String(fields.manipulation || "").trim().length >= 12],
