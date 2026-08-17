@@ -13,7 +13,7 @@ const relationPattern = /(связ|различ|динамик|механизм|
 const contextPattern = /(у\s+|среди\s+|в\s+условиях|на\s+выборке|студент|подрост|взросл|дет|работник|специалист)/i;
 
 export function analyzeTopic(topic: string, profile: TopicProfile, design: string): { score: number; wordCount: number; signals: TopicSignal[] } {
-  const clean = topic.trim().replace(/\s+/g, " ");
+  const clean = topic.slice(0, 20_000).trim().replace(/\s+/g, " ");
   const wordCount = clean ? clean.split(" ").length : 0;
   const focusedLimit = profile === "msu-branch" ? 11 : profile === "article" ? 18 : 22;
   const signals: TopicSignal[] = [
@@ -38,12 +38,15 @@ const normalizeKey = (key: string) => key.toLowerCase().replace(/[^a-zа-яё]/g
 
 export function findRestrictedDatasetPath(value: unknown): string | null {
   const stack: Array<{ value: unknown; path: string; depth: number }> = [{ value, path: "project", depth: 0 }];
+  const seen = new WeakSet<object>();
   let visited = 0;
   while (stack.length) {
     const current = stack.pop()!;
     visited += 1;
     if (visited > 10_000 || current.depth > 12) return `${current.path} (слишком сложная структура)`;
     if (!current.value || typeof current.value !== "object") continue;
+    if (seen.has(current.value)) continue;
+    seen.add(current.value);
     if (Array.isArray(current.value)) {
       if (current.value.length > 500) return `${current.path} (массив из ${current.value.length} записей)`;
       current.value.forEach((entry, index) => stack.push({ value: entry, path: `${current.path}[${index}]`, depth: current.depth + 1 }));

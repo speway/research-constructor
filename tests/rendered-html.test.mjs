@@ -61,6 +61,10 @@ test("serves the research workflow without a server error", async () => {
     "Научный сектор психологии",
     "Приватная сессия",
     "Четыре смысловых этапа",
+    "Следующие действия",
+    "Быстрый старт",
+    "Стресс-рецензия",
+    "Быстрый переход",
     "spw · @speway",
   ]) {
     assert.match(html, new RegExp(label, "i"));
