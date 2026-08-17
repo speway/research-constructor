@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="15" fill="#17325f"/>
-  <path d="M17 17h30v8H25v8h18v8H25v15h-8V17Z" fill="#fffaf0"/>
-  <circle cx="46" cy="49" r="8" fill="#ffad5b"/>
+  <rect width="64" height="64" rx="16" fill="#20182f"/>
+  <text x="32" y="46" text-anchor="middle" font-family="Georgia,serif" font-size="45" fill="#b8eee2">Ψ</text>
+  <circle cx="49" cy="14" r="5" fill="#efb45c"/>
 </svg>
