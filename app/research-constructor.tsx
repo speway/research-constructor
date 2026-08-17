@@ -1217,7 +1217,7 @@ function ReportStep({ project, update, readiness, exportDocx }: StepProps & { re
 
 function AuditStep({ project, update, audit, readiness, go, exportDocx, signals }: { project: Project; update: StepProps["update"]; audit: { label: string; ok: boolean; step: StepId; group?: string }[]; readiness: number; go: (id: StepId) => void; exportDocx: () => void; signals: { level: "critical" | "warning" | "good"; title: string; text: string; step: StepId }[] }) {
   const critical = audit.filter((item) => !item.ok);
-  const [reviewId, setReviewId] = useState(reviewerQuestions[0].id);
+  const [reviewId, setReviewId] = useState<(typeof reviewerQuestions)[number]["id"]>(reviewerQuestions[0].id);
   const currentReview = reviewerQuestions.find((item) => item.id === reviewId) || reviewerQuestions[0];
   const answered = reviewerQuestions.filter((item) => filled(project.reviewResponses[item.id] || "")).length;
   const nextUnanswered = reviewerQuestions.find((item) => !filled(project.reviewResponses[item.id] || ""));
